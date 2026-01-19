@@ -1,0 +1,111 @@
+#include "main.h"
+#include <stdio.h>
+#include <string.h>
+
+UART_HandleTypeDef huart2;
+
+__attribute__((section(".noinit"))) volatile uint32_t boot_magic;
+#define BOOT_MAGIC 0xB00710ADUL
+
+int __io_putchar(int ch)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, 100);
+  return ch;
+}
+
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+void Error_Handler(void);
+
+static void leds_all_off(void)
+{
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+}
+
+static void set_single_led(uint8_t idx)
+{
+  leds_all_off();
+  switch (idx & 3)
+  {
+    case 0: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET); break;
+    case 1: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET); break;
+    case 2: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET); break;
+    case 3: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET); break;
+  }
+}
+
+int main(void)
+{
+  HAL_Init();
+
+  /* Sabuk pengaman: pastikan VTOR APP */
+  SCB->VTOR = 0x08010000UL;
+
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_USART2_UART_Init();
+
+  printf("APP_READY\n");
+
+  uint8_t led_idx = 0;
+  set_single_led(led_idx);
+
+  char line[128];
+  int idx = 0;
+
+  while (1)
+  {
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
+    {
+      led_idx = (led_idx + 1) & 3;
+      set_single_led(led_idx);
+      printf("BTN: LED_IDX=%u\n", led_idx);
+
+      HAL_Delay(200);
+      while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {}
+      HAL_Delay(50);
+    }
+
+    if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_ORE)) {
+      __HAL_UART_CLEAR_OREFLAG(&huart2);
+    }
+
+    uint8_t c;
+    while (HAL_UART_Receive(&huart2, &c, 1, 0) == HAL_OK)
+    {
+      if (c == '\r') continue;
+
+      if (c == '\n')
+      {
+        if (idx > 0)
+        {
+          line[idx] = 0;
+          printf("RX: %s\n", line);
+
+          if (strcmp(line, "PING") == 0) {
+            printf("PONG\n");
+          } else if (strcmp(line, "HELLO") == 0) {
+            printf("HI FROM STM32\n");
+          } else if (strcmp(line, "ENTER_BL") == 0) {
+            printf("OK: ENTER_BL\n");
+            boot_magic = BOOT_MAGIC;
+            HAL_Delay(10);
+            NVIC_SystemReset();
+          } else {
+            printf("UNKNOWN\n");
+          }
+
+          idx = 0;
+        }
+      }
+      else
+      {
+        if (idx < (int)sizeof(line) - 1) line[idx++] = (char)c;
+        else idx = 0;
+      }
+    }
+
+    HAL_Delay(1);
+  }
+}

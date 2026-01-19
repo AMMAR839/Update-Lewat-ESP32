@@ -1,0 +1,14 @@
+../Core/Src/main.c:27:5:__io_putchar	16	static
+../Core/Src/main.c:34:17:crc32_update	40	static
+../Core/Src/main.c:49:12:uart_readline	40	static
+../Core/Src/main.c:71:12:uart_readbytes	40	static
+../Core/Src/main.c:87:17:sector_from_address	16	static
+../Core/Src/main.c:103:12:flash_erase_app	56	static
+../Core/Src/main.c:130:12:flash_write	48	static
+../Core/Src/main.c:156:12:app_is_valid	16	static
+../Core/Src/main.c:162:13:jump_to_app	24	static,ignoring_inline_asm
+../Core/Src/main.c:196:5:main	1192	static
+../Core/Src/main.c:282:6:SystemClock_Config	88	static
+../Core/Src/main.c:307:13:MX_USART2_UART_Init	16	static
+../Core/Src/main.c:324:13:MX_GPIO_Init	32	static
+../Core/Src/main.c:338:6:Error_Handler	4	static,ignoring_inline_asm

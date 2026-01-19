@@ -1,0 +1,14 @@
+../Core/Src/main.c:27:5:__io_putchar	1
+../Core/Src/main.c:34:17:crc32_update	3
+../Core/Src/main.c:49:12:uart_readline	7
+../Core/Src/main.c:71:12:uart_readbytes	5
+../Core/Src/main.c:87:17:sector_from_address	12
+../Core/Src/main.c:103:12:flash_erase_app	3
+../Core/Src/main.c:130:12:flash_write	4
+../Core/Src/main.c:156:12:app_is_valid	1
+../Core/Src/main.c:162:13:jump_to_app	2
+../Core/Src/main.c:196:5:main	18
+../Core/Src/main.c:282:6:SystemClock_Config	3
+../Core/Src/main.c:307:13:MX_USART2_UART_Init	2
+../Core/Src/main.c:324:13:MX_GPIO_Init	1
+../Core/Src/main.c:338:6:Error_Handler	1

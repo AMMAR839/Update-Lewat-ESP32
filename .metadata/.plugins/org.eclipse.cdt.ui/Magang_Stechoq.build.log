@@ -1,0 +1,10 @@
+16:11:06 **** Incremental Build of configuration Debug for project Magang_Stechoq ****
+make -j12 all 
+arm-none-eabi-size  Magang_Stechoq.elf 
+   text	   data	    bss	    dec	    hex	filename
+  16324	    104	   2116	  18544	   4870	Magang_Stechoq.elf
+Finished building: default.size.stdout
+ 
+
+16:11:06 Build Finished. 0 errors, 0 warnings. (took 239ms)
+

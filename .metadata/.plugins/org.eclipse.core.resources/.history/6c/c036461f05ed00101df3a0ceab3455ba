@@ -1,0 +1,98 @@
+#include "main.h"
+#include <string.h>
+#include <stdio.h>
+
+UART_HandleTypeDef huart2;
+
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+void SystemClock_Config(void);
+void Error_Handler(void);
+
+static void uart_write(const char *s)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
+}
+
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_USART2_UART_Init();
+
+  uart_write("BOOT: STM32 ready\r\n");
+
+  char line[64];
+  uint16_t idx = 0;
+  uint8_t b;
+
+  while (1)
+  {
+    // baca 1 byte (timeout 50ms)
+    if (HAL_UART_Receive(&huart2, &b, 1, 50) == HAL_OK)
+    {
+      if (b == '\n' || b == '\r')
+      {
+        if (idx > 0)
+        {
+          line[idx] = 0;
+
+          uart_write("RX: ");
+          uart_write(line);
+          uart_write("\r\n");
+
+          if (strcmp(line, "PING") == 0) uart_write("PONG\r\n");
+          else if (strcmp(line, "HELLO") == 0) uart_write("HI FROM STM32\r\n");
+          else { uart_write("UNKNOWN\r\n"); }
+
+          idx = 0;
+        }
+      }
+      else
+      {
+        if (idx < sizeof(line)-1) line[idx++] = (char)b;
+        else idx = 0;
+      }
+    }
+  }
+}
+
+static void MX_USART2_UART_Init(void)
+{
+  __HAL_RCC_USART2_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  // PA2 = TX, PA3 = RX (USART2 AF7)
+  GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+
+  if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+}
+
+static void MX_GPIO_Init(void)
+{
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1) {}
+}

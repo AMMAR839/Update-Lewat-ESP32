@@ -1,0 +1,342 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file    main.c
+  * @brief   STM32F407 Bootloader UART2 (PA2/PA3) OTA via ESP32
+  *          APP @ 0x08010000
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+#include "main.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* ===================== CONFIG ===================== */
+#define APP_START   0x08010000UL
+#define BOOT_MAGIC  0xB00710ADUL
+
+/* ===================== GLOBALS ===================== */
+UART_HandleTypeDef huart2;
+
+/* magic flag in RAM (.noinit) so it survives reset */
+__attribute__((section(".noinit"))) volatile uint32_t boot_magic;
+
+/* printf -> UART2 */
+int __io_putchar(int ch)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, 100);
+  return ch;
+}
+
+/* ===================== CRC32 (software) ===================== */
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len)
+{
+  crc = ~crc;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int b = 0; b < 8; b++) {
+      uint32_t m = -(crc & 1u);
+      crc = (crc >> 1) ^ (0xEDB88320u & m);
+    }
+  }
+  return ~crc;
+}
+
+/* ===================== UART helpers ===================== */
+/* IMPORTANT: delimiter hanya '\n', '\r' di-ignore (fix \r\n issue) */
+static int uart_readline(char *out, int max, uint32_t timeout_ms)
+{
+  int idx = 0;
+  uint8_t c;
+  uint32_t t0 = HAL_GetTick();
+
+  while ((HAL_GetTick() - t0) < timeout_ms) {
+    if (HAL_UART_Receive(&huart2, &c, 1, 10) == HAL_OK) {
+
+      if (c == '\r') continue;     // ignore CR
+      if (c == '\n') {             // LF ends line
+        if (idx == 0) continue;    // skip empty line
+        out[idx] = 0;
+        return 1;
+      }
+
+      if (idx < max - 1) out[idx++] = (char)c;
+    }
+  }
+  return 0;
+}
+
+static int uart_readbytes(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+{
+  uint32_t got = 0;
+  uint32_t t0 = HAL_GetTick();
+
+  while (got < len && (HAL_GetTick() - t0) < timeout_ms) {
+    uint32_t chunk = len - got;
+    if (chunk > 256) chunk = 256;
+    if (HAL_UART_Receive(&huart2, buf + got, chunk, 50) == HAL_OK) {
+      got += chunk;
+    }
+  }
+  return (got == len);
+}
+
+/* ===================== FLASH (STM32F407 sector map) ===================== */
+static uint32_t sector_from_address(uint32_t addr)
+{
+  if (addr < 0x08004000) return FLASH_SECTOR_0;
+  if (addr < 0x08008000) return FLASH_SECTOR_1;
+  if (addr < 0x0800C000) return FLASH_SECTOR_2;
+  if (addr < 0x08010000) return FLASH_SECTOR_3;
+  if (addr < 0x08020000) return FLASH_SECTOR_4;
+  if (addr < 0x08040000) return FLASH_SECTOR_5;
+  if (addr < 0x08060000) return FLASH_SECTOR_6;
+  if (addr < 0x08080000) return FLASH_SECTOR_7;
+  if (addr < 0x080A0000) return FLASH_SECTOR_8;
+  if (addr < 0x080C0000) return FLASH_SECTOR_9;
+  if (addr < 0x080E0000) return FLASH_SECTOR_10;
+  return FLASH_SECTOR_11;
+}
+
+static int flash_erase_app(uint32_t size)
+{
+  if (size == 0) return 0;
+
+  uint32_t start = APP_START;
+  uint32_t end   = APP_START + size - 1;
+
+  uint32_t sec_start = sector_from_address(start);
+  uint32_t sec_end   = sector_from_address(end);
+
+  FLASH_EraseInitTypeDef er = {0};
+  uint32_t sectorError = 0;
+
+  er.TypeErase    = FLASH_TYPEERASE_SECTORS;
+  er.VoltageRange = VOLTAGE_RANGE_3;
+  er.Sector       = sec_start;
+  er.NbSectors    = (sec_end - sec_start) + 1;
+
+  HAL_FLASH_Unlock();
+  if (HAL_FLASHEx_Erase(&er, &sectorError) != HAL_OK) {
+    HAL_FLASH_Lock();
+    return 0;
+  }
+  HAL_FLASH_Lock();
+  return 1;
+}
+
+static int flash_write(uint32_t addr, const uint8_t *data, uint32_t len)
+{
+  HAL_FLASH_Unlock();
+
+  for (uint32_t i = 0; i < len; i += 4) {
+    uint32_t w = 0xFFFFFFFF;
+    uint32_t remain = len - i;
+
+    if (remain >= 4) memcpy(&w, data + i, 4);
+    else {
+      uint8_t tmp[4] = {0xFF,0xFF,0xFF,0xFF};
+      memcpy(tmp, data + i, remain);
+      memcpy(&w, tmp, 4);
+    }
+
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, (uint64_t)w) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0;
+    }
+  }
+
+  HAL_FLASH_Lock();
+  return 1;
+}
+
+/* ===================== JUMP TO APP ===================== */
+static int app_is_valid(void)
+{
+  uint32_t sp = *(uint32_t*)APP_START;
+  return ((sp & 0x2FFE0000) == 0x20000000); // SRAM range check
+}
+
+static void jump_to_app(void)
+{
+  uint32_t sp = *(uint32_t*)APP_START;
+  uint32_t rh = *(uint32_t*)(APP_START + 4);
+
+  if (!app_is_valid()) {
+    printf("ERR: APP invalid\n");
+    return;
+  }
+
+  __disable_irq();
+
+  /* stop systick */
+  SysTick->CTRL = 0;
+  SysTick->LOAD = 0;
+  SysTick->VAL  = 0;
+
+  HAL_UART_DeInit(&huart2);
+  HAL_DeInit();
+
+  SCB->VTOR = APP_START;
+  __set_MSP(sp);
+
+  ((void (*)(void))rh)();
+  while (1) {}
+}
+
+/* ===================== CubeMX prototypes ===================== */
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+void Error_Handler(void);
+
+/* ===================== MAIN ===================== */
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_USART2_UART_Init();
+
+  /* kalau bukan request update: coba jump ke APP */
+  if (boot_magic != BOOT_MAGIC) {
+    jump_to_app(); // kalau APP valid, tidak balik
+  }
+
+  boot_magic = 0;
+  printf("BL_READY\n");
+
+  char line[128];
+  uint32_t fw_size = 0;
+  uint32_t running_crc = 0;
+  uint32_t expected_crc = 0;
+  uint32_t offset = 0;
+
+  /* BEGIN <size> */
+  if (!uart_readline(line, sizeof(line), 15000)) {
+    printf("ERR\n"); while (1) {}
+  }
+  if (sscanf(line, "BEGIN %lu", (unsigned long*)&fw_size) != 1 || fw_size == 0) {
+    printf("ERR\n"); while (1) {}
+  }
+  printf("OK\n");
+
+  if (!flash_erase_app(fw_size)) {
+    printf("ERR\n"); while (1) {}
+  }
+  printf("OK\n");
+
+  while (1)
+  {
+    if (!uart_readline(line, sizeof(line), 20000)) {
+      printf("ERR\n"); while (1) {}
+    }
+
+    /* END <crc> */
+    if (strncmp(line, "END ", 4) == 0) {
+      unsigned long tmp = 0;
+      if (sscanf(line, "END %lu", &tmp) != 1) { printf("ERR\n"); while (1) {} }
+      expected_crc = (uint32_t)tmp;
+
+      if (offset != fw_size) { printf("ERR\n"); while (1) {} }
+      if (running_crc != expected_crc) { printf("ERR\n"); while (1) {} }
+
+      printf("OK\n");
+      HAL_Delay(50);
+      jump_to_app();
+      while (1) {}
+    }
+
+    /* DATA <off> <len> + raw bytes */
+    uint32_t off = 0, len = 0;
+    if (sscanf(line, "DATA %lu %lu", (unsigned long*)&off, (unsigned long*)&len) != 2) {
+      printf("ERR\n");
+      continue;
+    }
+    if (len == 0 || len > 1024 || off != offset || (off + len) > fw_size) {
+      printf("ERR\n");
+      continue;
+    }
+
+    uint8_t buf[1024];
+    if (!uart_readbytes(buf, len, 12000)) {
+      printf("ERR\n");
+      continue;
+    }
+
+    if (!flash_write(APP_START + off, buf, len)) {
+      printf("ERR\n");
+      continue;
+    }
+
+    running_crc = crc32_update(running_crc, buf, len);
+    offset += len;
+
+    printf("OK\n");
+  }
+}
+
+/* ===================== CLOCK: HSI 16MHz ===================== */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK) Error_Handler();
+}
+
+/* ===================== USART2 115200 (PA2/PA3) ===================== */
+static void MX_USART2_UART_Init(void)
+{
+  __HAL_RCC_USART2_CLK_ENABLE();
+
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+
+  if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+}
+
+/* ===================== GPIO: PA2/PA3 AF7 ===================== */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1) {}
+}

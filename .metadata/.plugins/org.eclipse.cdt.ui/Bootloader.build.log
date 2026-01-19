@@ -1,0 +1,16 @@
+14:42:06 **** Incremental Build of configuration Debug for project Bootloader ****
+make -j12 all 
+arm-none-eabi-gcc -o "Bootloader.elf" @"objects.list"   -mcpu=cortex-m4 -T"C:\Users\Swift 3\STM32CubeIDE\workspace_1.18.1\Bootloader\STM32F407IEHX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Bootloader.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: Bootloader.elf
+ 
+arm-none-eabi-size  Bootloader.elf 
+arm-none-eabi-objdump -h -S Bootloader.elf  > "Bootloader.list"
+   text	   data	    bss	    dec	    hex	filename
+  20504	    136	   1980	  22620	   585c	Bootloader.elf
+Finished building: default.size.stdout
+ 
+Finished building: Bootloader.list
+ 
+
+14:42:06 Build Finished. 0 errors, 0 warnings. (took 662ms)
+
